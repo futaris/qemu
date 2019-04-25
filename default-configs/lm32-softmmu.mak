@@ -6,5 +6,6 @@
 
 # Boards:
 #
+CONFIG_LITEX=y
 CONFIG_LM32=y
 CONFIG_MILKYMIST=y

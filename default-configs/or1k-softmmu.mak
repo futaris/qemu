@@ -2,4 +2,5 @@
 
 # Boards:
 #
+CONFIG_LITEX=y
 CONFIG_OR1K_SIM=y

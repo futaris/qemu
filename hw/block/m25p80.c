@@ -1259,6 +1259,13 @@ static uint32_t m25p80_transfer8(SSISlave *ss, uint32_t tx)
     return r;
 }
 
+void* m25p80_get_storage(void *opaque);
+void* m25p80_get_storage(void *opaque)
+{
+    Flash *s = M25P80(opaque);
+    return s->storage;
+}
+
 static void m25p80_realize(SSISlave *ss, Error **errp)
 {
     Flash *s = M25P80(ss);
