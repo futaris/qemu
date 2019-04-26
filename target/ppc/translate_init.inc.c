@@ -1653,6 +1653,15 @@ static void spr_write_booke_pid(DisasContext *ctx, int sprn, int gprn)
     gen_helper_booke_setpid(cpu_env, t0, cpu_gpr[gprn]);
     tcg_temp_free_i32(t0);
 }
+static void spr_write_eplc(DisasContext *ctx, int sprn, int gprn)
+{
+    gen_helper_booke_set_eplc(cpu_env, cpu_gpr[gprn]);
+}
+static void spr_write_epsc(DisasContext *ctx, int sprn, int gprn)
+{
+    gen_helper_booke_set_epsc(cpu_env, cpu_gpr[gprn]);
+}
+
 #endif
 
 static void gen_spr_usprg3(CPUPPCState *env)
@@ -1912,6 +1921,16 @@ static void gen_spr_BookE206(CPUPPCState *env, uint32_t mas_mask,
                      &spr_read_generic, &spr_write_booke_pid,
                      0x00000000);
     }
+
+    spr_register(env, SPR_BOOKE_EPLC, "EPLC",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_eplc,
+                 0x00000000);
+    spr_register(env, SPR_BOOKE_EPSC, "EPSC",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_epsc,
+                 0x00000000);
+
     /* XXX : not implemented */
     spr_register(env, SPR_MMUCFG, "MMUCFG",
                  SPR_NOACCESS, SPR_NOACCESS,
@@ -2797,8 +2816,6 @@ static void gen_spr_8xx(CPUPPCState *env)
  * perf    => 768-783 (Power 2.04)
  * perf    => 784-799 (Power 2.04)
  * PPR     => SPR 896 (Power 2.04)
- * EPLC    => SPR 947 (Power 2.04 emb)
- * EPSC    => SPR 948 (Power 2.04 emb)
  * DABRX   => 1015    (Power 2.04 hypv)
  * FPECR   => SPR 1022 (?)
  * ... and more (thermal management, performance counters, ...)
@@ -8197,11 +8214,11 @@ static void gen_spr_power9_mmu(CPUPPCState *env)
 {
 #if !defined(CONFIG_USER_ONLY)
     /* Partition Table Control */
-    spr_register_hv(env, SPR_PTCR, "PTCR",
-                    SPR_NOACCESS, SPR_NOACCESS,
-                    SPR_NOACCESS, SPR_NOACCESS,
-                    &spr_read_generic, &spr_write_ptcr,
-                    0x00000000);
+    spr_register_kvm_hv(env, SPR_PTCR, "PTCR",
+                        SPR_NOACCESS, SPR_NOACCESS,
+                        SPR_NOACCESS, SPR_NOACCESS,
+                        &spr_read_generic, &spr_write_ptcr,
+                        KVM_REG_PPC_PTCR, 0x00000000);
 #endif
 }
 
@@ -8381,8 +8398,8 @@ static void getset_compat_deprecated(Object *obj, Visitor *v, const char *name,
     QNull *null = NULL;
 
     if (!qtest_enabled()) {
-        error_report("CPU 'compat' property is deprecated and has no effect; "
-                     "use max-cpu-compat machine property instead");
+        warn_report("CPU 'compat' property is deprecated and has no effect; "
+                    "use max-cpu-compat machine property instead");
     }
     visit_type_null(v, name, &null, NULL);
     qobject_unref(null);
@@ -9647,17 +9664,6 @@ static int ppc_fixup_cpu(PowerPCCPU *cpu)
     return 0;
 }
 
-static inline bool ppc_cpu_is_valid(PowerPCCPUClass *pcc)
-{
-#ifdef TARGET_PPCEMB
-    return pcc->mmu_model == POWERPC_MMU_BOOKE ||
-           pcc->mmu_model == POWERPC_MMU_SOFT_4xx ||
-           pcc->mmu_model == POWERPC_MMU_SOFT_4xx_Z;
-#else
-    return true;
-#endif
-}
-
 static void ppc_cpu_realize(DeviceState *dev, Error **errp)
 {
     CPUState *cs = CPU(dev);
@@ -9680,8 +9686,6 @@ static void ppc_cpu_realize(DeviceState *dev, Error **errp)
             goto unrealize;
         }
     }
-
-    assert(ppc_cpu_is_valid(pcc));
 
     create_ppc_opcodes(cpu, &local_err);
     if (local_err != NULL) {
@@ -9933,10 +9937,6 @@ static gint ppc_cpu_compare_class_pvr(gconstpointer a, gconstpointer b)
         return -1;
     }
 
-    if (!ppc_cpu_is_valid(pcc)) {
-        return -1;
-    }
-
     return pcc->pvr == pvr ? 0 : -1;
 }
 
@@ -9964,10 +9964,6 @@ static gint ppc_cpu_compare_class_pvr_mask(gconstpointer a, gconstpointer b)
     /* -cpu host does a PVR lookup during construction */
     if (unlikely(strcmp(object_class_get_name(oc),
                         TYPE_HOST_POWERPC_CPU) == 0)) {
-        return -1;
-    }
-
-    if (!ppc_cpu_is_valid(pcc)) {
         return -1;
     }
 
@@ -10036,11 +10032,7 @@ static ObjectClass *ppc_cpu_class_by_name(const char *name)
     g_free(typename);
     g_free(cpu_model);
 
-    if (oc && ppc_cpu_is_valid(POWERPC_CPU_CLASS(oc))) {
-        return oc;
-    }
-
-    return NULL;
+    return oc;
 }
 
 static void ppc_cpu_parse_featurestr(const char *type, char *features,
@@ -10146,9 +10138,6 @@ static void ppc_cpu_list_entry(gpointer data, gpointer user_data)
     char *name;
     int i;
 
-    if (!ppc_cpu_is_valid(pcc)) {
-        return;
-    }
     if (unlikely(strcmp(typename, TYPE_HOST_POWERPC_CPU) == 0)) {
         return;
     }
@@ -10206,11 +10195,6 @@ static void ppc_cpu_defs_entry(gpointer data, gpointer user_data)
     const char *typename;
     CpuDefinitionInfoList *entry;
     CpuDefinitionInfo *info;
-    PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(oc);
-
-    if (!ppc_cpu_is_valid(pcc)) {
-        return;
-    }
 
     typename = object_class_get_name(oc);
     info = g_malloc0(sizeof(*info));

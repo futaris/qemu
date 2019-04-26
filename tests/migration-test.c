@@ -21,11 +21,13 @@
 #include "chardev/char.h"
 #include "sysemu/sysemu.h"
 
+#include "migration/migration-test.h"
+
 /* TODO actually test the results and get rid of this */
 #define qtest_qmp_discard_response(...) qobject_unref(qtest_qmp(__VA_ARGS__))
 
-const unsigned start_address = 1024 * 1024;
-const unsigned end_address = 100 * 1024 * 1024;
+unsigned start_address;
+unsigned end_address;
 bool got_stop;
 static bool uffd_feature_thread_id;
 
@@ -80,16 +82,28 @@ static bool ufd_version_check(void)
 
 static const char *tmpfs;
 
-/* A simple PC boot sector that modifies memory (1-100MB) quickly
- * outputting a 'B' every so often if it's still running.
+/* The boot file modifies memory area in [start_address, end_address)
+ * repeatedly. It outputs a 'B' at a fixed rate while it's still running.
  */
-#include "tests/migration/x86-a-b-bootblock.h"
+#include "tests/migration/i386/a-b-bootblock.h"
+#include "tests/migration/aarch64/a-b-kernel.h"
 
-static void init_bootfile_x86(const char *bootpath)
+static void init_bootfile(const char *bootpath, void *content)
 {
     FILE *bootfile = fopen(bootpath, "wb");
 
-    g_assert_cmpint(fwrite(x86_bootsect, 512, 1, bootfile), ==, 1);
+    g_assert_cmpint(fwrite(content, 512, 1, bootfile), ==, 1);
+    fclose(bootfile);
+}
+
+#include "tests/migration/s390x/a-b-bios.h"
+
+static void init_bootfile_s390x(const char *bootpath)
+{
+    FILE *bootfile = fopen(bootpath, "wb");
+    size_t len = sizeof(s390x_elf);
+
+    g_assert_cmpint(fwrite(s390x_elf, len, 1, bootfile), ==, 1);
     fclose(bootfile);
 }
 
@@ -270,11 +284,11 @@ static void wait_for_migration_pass(QTestState *who)
 static void check_guests_ram(QTestState *who)
 {
     /* Our ASM test will have been incrementing one byte from each page from
-     * 1MB to <100MB in order.
-     * This gives us a constraint that any page's byte should be equal or less
-     * than the previous pages byte (mod 256); and they should all be equal
-     * except for one transition at the point where we meet the incrementer.
-     * (We're running this with the guest stopped).
+     * start_address to < end_address in order. This gives us a constraint
+     * that any page's byte should be equal or less than the previous pages
+     * byte (mod 256); and they should all be equal except for one transition
+     * at the point where we meet the incrementer. (We're running this with
+     * the guest stopped).
      */
     unsigned address;
     uint8_t first_byte;
@@ -285,7 +299,8 @@ static void check_guests_ram(QTestState *who)
     qtest_memread(who, start_address, &first_byte, 1);
     last_byte = first_byte;
 
-    for (address = start_address + 4096; address < end_address; address += 4096)
+    for (address = start_address + TEST_MEM_PAGE_SIZE; address < end_address;
+         address += TEST_MEM_PAGE_SIZE)
     {
         uint8_t b;
         qtest_memread(who, address, &b, 1);
@@ -425,7 +440,7 @@ static int test_migrate_start(QTestState **from, QTestState **to,
     got_stop = false;
 
     if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
-        init_bootfile_x86(bootpath);
+        init_bootfile(bootpath, x86_bootsect);
         cmd_src = g_strdup_printf("-machine accel=%s -m 150M"
                                   " -name source,debug-threads=on"
                                   " -serial file:%s/src_serial"
@@ -437,12 +452,27 @@ static int test_migrate_start(QTestState **from, QTestState **to,
                                   " -drive file=%s,format=raw"
                                   " -incoming %s",
                                   accel, tmpfs, bootpath, uri);
+        start_address = X86_TEST_MEM_START;
+        end_address = X86_TEST_MEM_END;
+    } else if (g_str_equal(arch, "s390x")) {
+        init_bootfile_s390x(bootpath);
+        cmd_src = g_strdup_printf("-machine accel=%s -m 128M"
+                                  " -name source,debug-threads=on"
+                                  " -serial file:%s/src_serial -bios %s",
+                                  accel, tmpfs, bootpath);
+        cmd_dst = g_strdup_printf("-machine accel=%s -m 128M"
+                                  " -name target,debug-threads=on"
+                                  " -serial file:%s/dest_serial -bios %s"
+                                  " -incoming %s",
+                                  accel, tmpfs, bootpath, uri);
+        start_address = S390_TEST_MEM_START;
+        end_address = S390_TEST_MEM_END;
     } else if (strcmp(arch, "ppc64") == 0) {
-        cmd_src = g_strdup_printf("-machine accel=%s -m 256M"
+        cmd_src = g_strdup_printf("-machine accel=%s -m 256M -nodefaults"
                                   " -name source,debug-threads=on"
                                   " -serial file:%s/src_serial"
-                                  " -prom-env '"
-                                  "boot-command=hex .\" _\" begin %x %x "
+                                  " -prom-env 'use-nvramrc?=true' -prom-env "
+                                  "'nvramrc=hex .\" _\" begin %x %x "
                                   "do i c@ 1 + i c! 1000 +loop .\" B\" 0 "
                                   "until'",  accel, tmpfs, end_address,
                                   start_address);
@@ -451,6 +481,27 @@ static int test_migrate_start(QTestState **from, QTestState **to,
                                   " -serial file:%s/dest_serial"
                                   " -incoming %s",
                                   accel, tmpfs, uri);
+
+        start_address = PPC_TEST_MEM_START;
+        end_address = PPC_TEST_MEM_END;
+    } else if (strcmp(arch, "aarch64") == 0) {
+        init_bootfile(bootpath, aarch64_kernel);
+        cmd_src = g_strdup_printf("-machine virt,accel=%s,gic-version=max "
+                                  "-name vmsource,debug-threads=on -cpu max "
+                                  "-m 150M -serial file:%s/src_serial "
+                                  "-kernel %s ",
+                                  accel, tmpfs, bootpath);
+        cmd_dst = g_strdup_printf("-machine virt,accel=%s,gic-version=max "
+                                  "-name vmdest,debug-threads=on -cpu max "
+                                  "-m 150M -serial file:%s/dest_serial "
+                                  "-kernel %s "
+                                  "-incoming %s ",
+                                  accel, tmpfs, bootpath, uri);
+
+        start_address = ARM_TEST_MEM_START;
+        end_address = ARM_TEST_MEM_END;
+
+        g_assert(sizeof(aarch64_kernel) <= ARM_TEST_MAX_KERNEL_SIZE);
     } else {
         g_assert_not_reached();
     }
@@ -537,7 +588,7 @@ static void test_deprecated(void)
 {
     QTestState *from;
 
-    from = qtest_start("");
+    from = qtest_start("-machine none");
 
     deprecated_set_downtime(from, 0.12345);
     deprecated_set_speed(from, 12345);
@@ -750,6 +801,22 @@ int main(int argc, char **argv)
         access("/sys/module/kvm_hv", F_OK)) {
         g_test_message("Skipping test: kvm_hv not available");
         return 0;
+    }
+
+    /*
+     * Similar to ppc64, s390x seems to be touchy with TCG, so disable it
+     * there until the problems are resolved
+     */
+    if (g_str_equal(qtest_get_arch(), "s390x")) {
+#if defined(HOST_S390X)
+        if (access("/dev/kvm", R_OK | W_OK)) {
+            g_test_message("Skipping test: kvm not available");
+            return 0;
+        }
+#else
+        g_test_message("Skipping test: Need s390x host to work properly");
+        return 0;
+#endif
     }
 
     tmpfs = mkdtemp(template);

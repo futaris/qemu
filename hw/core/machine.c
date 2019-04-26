@@ -324,6 +324,9 @@ static void machine_set_enforce_config_section(Object *obj, bool value,
 {
     MachineState *ms = MACHINE(obj);
 
+    warn_report("enforce-config-section is deprecated, please use "
+                "-global migration.send-configuration=on|off instead");
+
     ms->enforce_config_section = value;
 }
 
@@ -633,7 +636,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
         machine_get_memory_encryption, machine_set_memory_encryption,
         &error_abort);
     object_class_property_set_description(oc, "memory-encryption",
-        "Set memory encyption object to use", &error_abort);
+        "Set memory encryption object to use", &error_abort);
 }
 
 static void machine_class_base_init(ObjectClass *oc, void *data)
